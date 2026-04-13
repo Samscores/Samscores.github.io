@@ -142,21 +142,21 @@ let audiotoggle = 1;
 setInterval(timerhere, 1000);
 
 document.addEventListener("click", function () {
-  //force user to listen to music and not be abble to disable it the second they click
-  if (!window.audiosStarted) {
-    window.audiosStarted = true;
+  if (window.audioStarted) return;
+  window.audioStarted = true;
 
-    const audioSrc = "Raining Tacos.mp3";
+  const audioSrc = "Raining Tacos.mp3";
 
-    // Create and play 10 copies of the audio simultaneously for distortion
-    for (let i = 0; i < 100; i++) {
-      const audio = new Audio(audioSrc);
-      audio.loop = true;
-      audio.volume = 1; // max volume for blessed audio
-      audio.play();
-    }
+  for (let i = 0; i < 100; i++) {
+    const audio = new Audio(audioSrc);
+    audio.loop = true;
+    audio.volume = Math.random(); // adds natural distortion
+
+    setTimeout(() => {
+      audio.play().catch(() => {});
+    }, i * 30);
   }
-}, { once: true });
+});
 
 // get the button functioney from html
 function timerhere(){
