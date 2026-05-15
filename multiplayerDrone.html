@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>FPV Multiplayer Acro Simulator</title>
+
+<style>
+body {
+    margin: 0;
+    overflow: hidden;
+    font-family: Arial, sans-serif;
+    background: black;
+}
+
+#hud {
+    position: absolute;
+    top: 80px;
+    left: 10px;
+    color: white;
+    background: rgba(0,0,0,0.65);
+    padding: 14px;
+    border-radius: 10px;
+    width: 260px;
+    z-index: 1500;
+}
+
+input[type="range"] { width: 100%; }
+button { width: 100%; margin: 5px 0; }
+
+.navbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    padding: 15px 20px;
+    background: rgba(0,0,0,0.85);
+    color: white;
+    z-index: 2000;
+}
+</style>
+</head>
+
+<body>
+
+<div id="hud">
+<b>MULTIPLAYER FPV</b><br><br>
+
+<button onclick="hostRoom()">HOST</button>
+<input id="roomId" placeholder="ROOM ID"/>
+<button onclick="joinRoom()">JOIN</button>
+
+<div id="status"></div>
+
+<hr>
+
+<label>Pitch</label>
+<input id="pitch" type="range" min="0" max="100" value="40">
+
+<label>Roll</label>
+<input id="roll" type="range" min="0" max="100" value="30">
+
+<label>Yaw</label>
+<input id="yaw" type="range" min="0" max="100" value="40">
+
+<label>Throttle</label>
+<input id="throttle" type="range" min="0" max="100" value="50">
+</div>
+
+<div class="navbar">
+<div>FPV MULTIPLAYER SIM</div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160/build/three.module.js';
+
+/* ---------------- WORLD ---------------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87ceeb);
+
+const camera = new THREE.PerspectiveCamera(90, innerWidth/innerHeight, 0.1, 20000);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffffff,0.5));
+const sun = new THREE.DirectionalLight(0xffffff,1);
+sun.position.set(200,300,200);
+scene.add(sun);
+
+/* ---------------- GROUND ---------------- */
+const ground = new THREE.Mesh(
+    new THREE.PlaneGeometry(20000,20000),
+    new THREE.MeshStandardMaterial({color:0x3fa34d})
+);
+ground.rotation.x = -Math.PI/2;
+scene.add(ground);
+
+/* ---------------- COLLIDERS ---------------- */
+const colliders = [];
+
+for(let i=0;i<200;i++){
+    const box = new THREE.Mesh(
+        new THREE.BoxGeometry(100,100+Math.random()*300,100),
+        new THREE.MeshStandardMaterial({color:0x126112})
+    );
+
+    box.position.set(
+        (Math.random()-0.5)*6000,
+        50,
+        (Math.random()-0.5)*6000
+    );
+
+    scene.add(box);
+    colliders.push(new THREE.Box3().setFromObject(box));
+}
+
+/* ---------------- DRONE ---------------- */
+const drone = {
+    velocity: new THREE.Vector3(),
+    gravity: 0.09,
+    drag: 0.99,
+    maxSpeed: 30
+};
+
+/* ---------------- INPUT ---------------- */
+const keys = {};
+window.addEventListener("keydown",e=>keys[e.key]=true);
+window.addEventListener("keyup",e=>keys[e.key]=false);
+
+/* ---------------- GAMEPAD ---------------- */
+let gpIndex = null;
+window.addEventListener("gamepadconnected", (e)=>{
+    gpIndex = e.gamepad.index;
+    document.getElementById("status").innerText = "Controller connected";
+});
+function getGamepad(){
+    if(gpIndex === null) return null;
+    return navigator.getGamepads()[gpIndex];
+}
+function dz(v,d=0.1){ return Math.abs(v)<d ? 0 : v; }
+function norm(v){ return v/100; }
+
+/* ---------------- WEBRTC ---------------- */
+let pc;
+let dataChannel;
+let isHost = false;
+
+/* ICE servers (public STUN only, no signup) */
+const config = {
+    iceServers: [
+        { urls: "stun:stun.l.google.com:19302" }
+    ]
+};
+
+/* encode/decode helper (base64 JSON) */
+function encode(obj){
+    return btoa(JSON.stringify(obj));
+}
+function decode(str){
+    return JSON.parse(atob(str));
+}
+
+/* ---------------- HOST ---------------- */
+window.hostRoom = async function(){
+
+    isHost = true;
+    pc = new RTCPeerConnection(config);
+
+    dataChannel = pc.createDataChannel("fpv");
+
+    setupChannel();
+
+    pc.onicecandidate = (e)=>{
+        if(e.candidate) return;
+        document.getElementById("status").innerText =
+            "SEND THIS TO JOINER:\n\n" + encode(pc.localDescription);
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+};
+
+/* ---------------- JOIN ---------------- */
+window.joinRoom = async function(){
+
+    pc = new RTCPeerConnection(config);
+
+    pc.ondatachannel = (e)=>{
+        dataChannel = e.channel;
+        setupChannel();
+    };
+
+    pc.onicecandidate = (e)=>{
+        if(e.candidate) return;
+        document.getElementById("status").innerText =
+            "SEND THIS BACK TO HOST:\n\n" + encode(pc.localDescription);
+    };
+
+    const offer = decode(document.getElementById("roomId").value);
+
+    await pc.setRemoteDescription(offer);
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+};
+
+/* ---------------- SIGNALLING CHANNEL ---------------- */
+function setupChannel(){
+    dataChannel.onmessage = (e)=>{
+        const d = JSON.parse(e.data);
+
+        if(d.type === "state"){
+            remote.position.set(d.x,d.y,d.z);
+        }
+    };
+}
+
+/* ---------------- REMOTE DRONE ---------------- */
+const remote = new THREE.Mesh(
+    new THREE.BoxGeometry(20,10,20),
+    new THREE.MeshStandardMaterial({color:0xff0000})
+);
+scene.add(remote);
+
+/* ---------------- SEND STATE ---------------- */
+function sendState(){
+    if(!dataChannel || dataChannel.readyState !== "open") return;
+
+    dataChannel.send(JSON.stringify({
+        type:"state",
+        x:camera.position.x,
+        y:camera.position.y,
+        z:camera.position.z
+    }));
+}
+
+/* ---------------- PHYSICS LOOP ---------------- */
+function animate(){
+requestAnimationFrame(animate);
+
+let pitch=0, roll=0, yaw=0, throttle=0;
+
+const gp = getGamepad();
+
+if(gp){
+    pitch = -dz(gp.axes[3]);
+    roll = dz(gp.axes[2]);
+    yaw = dz(gp.axes[0]);
+    throttle = -dz(gp.axes[1]);
+}
+
+const k=0.8;
+if(keys.w) pitch=k;
+if(keys.s) pitch=-k;
+if(keys.a) yaw=-k;
+if(keys.d) yaw=k;
+if(keys.q) roll=-k;
+if(keys.e) roll=k;
+if(keys[" "]) throttle=1;
+
+const pitchRate = norm(40)*0.05;
+const rollRate  = norm(30)*0.05;
+const yawRate   = norm(40)*0.05;
+const throttlePower = norm(50)*0.5;
+
+camera.rotateY(-yaw*yawRate);
+camera.rotateX(-pitch*pitchRate);
+camera.rotateZ(-roll*rollRate);
+
+const up = new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion);
+
+drone.velocity.addScaledVector(up, throttle*throttlePower);
+drone.velocity.y -= drone.gravity;
+drone.velocity.multiplyScalar(drone.drag);
+
+if(drone.velocity.length()>drone.maxSpeed){
+    drone.velocity.setLength(drone.maxSpeed);
+}
+
+const next = camera.position.clone().add(drone.velocity);
+
+if(next.y < 2){
+    next.y = 2;
+    drone.velocity.y *= -0.3;
+}
+
+const box = new THREE.Box3(
+    new THREE.Vector3(next.x-2,next.y-2,next.z-2),
+    new THREE.Vector3(next.x+2,next.y+2,next.z+2)
+);
+
+let hit=false;
+for(const c of colliders){
+    if(box.intersectsBox(c)) hit=true;
+}
+
+if(!hit) camera.position.copy(next);
+else drone.velocity.multiplyScalar(-0.2);
+
+sendState();
+
+renderer.render(scene,camera);
+}
+
+animate();
+
+/* resize */
+window.addEventListener("resize",()=>{
+camera.aspect = innerWidth/innerHeight;
+camera.updateProjectionMatrix();
+renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+
+
+</body>
+</html>
